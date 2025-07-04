@@ -84,18 +84,21 @@ export class R2StorageService {
     }
 
     try {
+      const fetchStart = Date.now();
       const response = await this.client.send(
         new GetObjectCommand({
           Bucket: this.bucketName,
           Key: key,
         }),
       );
+      const fetchTime = Date.now() - fetchStart;
 
       if (!response.Body) {
         throw new Error("Empty response body");
       }
 
       // Convert stream to buffer
+      const streamStart = Date.now();
       const chunks: Uint8Array[] = [];
       const stream = response.Body as Readable;
 
@@ -104,8 +107,10 @@ export class R2StorageService {
       }
 
       const buffer = Buffer.concat(chunks);
+      const streamTime = Date.now() - streamStart;
 
       // Detect compression based on file extension
+      const decompressStart = Date.now();
       let decompressed: Buffer;
       if (key.endsWith(".zst")) {
         decompressed = await zstdDecompress(buffer);
@@ -115,8 +120,15 @@ export class R2StorageService {
         // Assume zstd for unknown extensions
         decompressed = await zstdDecompress(buffer);
       }
+      const decompressTime = Date.now() - decompressStart;
 
-      return JSON.parse(decompressed.toString());
+      const parseStart = Date.now();
+      const result = JSON.parse(decompressed.toString());
+      const parseTime = Date.now() - parseStart;
+      
+      console.log(`[ReplayTelemetry] R2 batch metrics - Total: ${Date.now() - fetchStart}ms (Fetch: ${fetchTime}ms, Stream: ${streamTime}ms, Decompress: ${decompressTime}ms, Parse: ${parseTime}ms) Size: ${buffer.length} bytes`);
+
+      return result;
     } catch (error) {
       console.error("[R2Storage] Failed to retrieve batch:", error);
       throw error;
