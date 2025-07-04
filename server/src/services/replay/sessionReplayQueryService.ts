@@ -131,11 +131,7 @@ export class SessionReplayQueryService {
     siteId: number,
     sessionId: string
   ): Promise<GetSessionReplayEventsResponse> {
-    const startTime = Date.now();
-    console.log(`[ReplayTelemetry] Loading events for session ${sessionId}`);
-    
     // Get metadata
-    const metadataStart = Date.now();
     const metadataResult = await clickhouse.query({
       query: `
         SELECT *
@@ -151,14 +147,12 @@ export class SessionReplayQueryService {
 
     const metadataResults = await processResults<any>(metadataResult);
     const metadata = metadataResults[0];
-    console.log(`[ReplayTelemetry] Metadata query took ${Date.now() - metadataStart}ms`);
 
     if (!metadata) {
       throw new Error("Session replay not found");
     }
 
     // Get events
-    const eventsQueryStart = Date.now();
     const eventsResult = await clickhouse.query({
       query: `
         SELECT 
@@ -185,7 +179,6 @@ export class SessionReplayQueryService {
     };
 
     const eventsResults = await processResults<EventRow>(eventsResult);
-    console.log(`[ReplayTelemetry] Events query took ${Date.now() - eventsQueryStart}ms, found ${eventsResults.length} events`);
 
     // Group events by batch key for efficient R2 retrieval
     const eventsByBatch = new Map<string | null, EventRow[]>();
@@ -196,14 +189,9 @@ export class SessionReplayQueryService {
       }
       eventsByBatch.get(key)!.push(event);
     });
-    
-    const r2BatchKeys = Array.from(eventsByBatch.keys()).filter(k => k !== null);
-    console.log(`[ReplayTelemetry] Found ${r2BatchKeys.length} R2 batches to fetch`);
 
     // Process batches and reconstruct events
     const events = [];
-    const r2FetchStart = Date.now();
-    let r2FetchCount = 0;
     
     // Separate R2 and ClickHouse batches
     const r2Batches: Array<[string, EventRow[]]> = [];
@@ -229,18 +217,15 @@ export class SessionReplayQueryService {
     }
     
     // Fetch R2 batches in parallel (with concurrency limit)
-    const PARALLEL_BATCH_SIZE = 10; // Fetch 10 batches at a time
+    const PARALLEL_BATCH_SIZE = 20; // Fetch 20 batches at a time
     const r2Results: Array<{ batchKey: string; batchEvents: EventRow[]; data: any[] | null }> = [];
     
     for (let i = 0; i < r2Batches.length; i += PARALLEL_BATCH_SIZE) {
       const batchSlice = r2Batches.slice(i, i + PARALLEL_BATCH_SIZE);
-      const parallelFetchStart = Date.now();
       
       const promises = batchSlice.map(async ([batchKey, batchEvents]) => {
         try {
-          const batchFetchStart = Date.now();
           const eventDataArray = await r2Storage.getBatch(batchKey);
-          console.log(`[ReplayTelemetry] R2 batch ${batchKey} fetch took ${Date.now() - batchFetchStart}ms`);
           return { batchKey, batchEvents, data: eventDataArray };
         } catch (error) {
           console.error(`Failed to fetch R2 batch ${batchKey}:`, error);
@@ -250,9 +235,6 @@ export class SessionReplayQueryService {
       
       const results = await Promise.all(promises);
       r2Results.push(...results);
-      r2FetchCount += results.filter(r => r.data !== null).length;
-      
-      console.log(`[ReplayTelemetry] Parallel batch ${Math.floor(i / PARALLEL_BATCH_SIZE) + 1}/${Math.ceil(r2Batches.length / PARALLEL_BATCH_SIZE)} took ${Date.now() - parallelFetchStart}ms`);
     }
     
     // Process R2 results
@@ -272,12 +254,6 @@ export class SessionReplayQueryService {
 
     // Sort events by timestamp (in case batches were processed out of order)
     events.sort((a, b) => a.timestamp - b.timestamp);
-    
-    if (r2FetchCount > 0) {
-      console.log(`[ReplayTelemetry] Total R2 fetch time: ${Date.now() - r2FetchStart}ms for ${r2FetchCount} batches`);
-    }
-    
-    console.log(`[ReplayTelemetry] Total load time: ${Date.now() - startTime}ms for ${events.length} events`);
 
     return {
       events,
