@@ -205,37 +205,67 @@ export class SessionReplayQueryService {
     const r2FetchStart = Date.now();
     let r2FetchCount = 0;
     
+    // Separate R2 and ClickHouse batches
+    const r2Batches: Array<[string, EventRow[]]> = [];
+    const clickhouseBatches: Array<[string | null, EventRow[]]> = [];
+    
     for (const [batchKey, batchEvents] of eventsByBatch) {
       if (batchKey && r2Storage.isEnabled()) {
-        // Fetch event data from R2
+        r2Batches.push([batchKey, batchEvents]);
+      } else {
+        clickhouseBatches.push([batchKey, batchEvents]);
+      }
+    }
+    
+    // Process ClickHouse batches immediately
+    for (const [_, batchEvents] of clickhouseBatches) {
+      for (const event of batchEvents) {
+        events.push({
+          timestamp: event.timestamp,
+          type: event.type,
+          data: JSON.parse(event.data),
+        });
+      }
+    }
+    
+    // Fetch R2 batches in parallel (with concurrency limit)
+    const PARALLEL_BATCH_SIZE = 10; // Fetch 10 batches at a time
+    const r2Results: Array<{ batchKey: string; batchEvents: EventRow[]; data: any[] | null }> = [];
+    
+    for (let i = 0; i < r2Batches.length; i += PARALLEL_BATCH_SIZE) {
+      const batchSlice = r2Batches.slice(i, i + PARALLEL_BATCH_SIZE);
+      const parallelFetchStart = Date.now();
+      
+      const promises = batchSlice.map(async ([batchKey, batchEvents]) => {
         try {
           const batchFetchStart = Date.now();
           const eventDataArray = await r2Storage.getBatch(batchKey);
-          r2FetchCount++;
           console.log(`[ReplayTelemetry] R2 batch ${batchKey} fetch took ${Date.now() - batchFetchStart}ms`);
-          
-          // Map R2 data back to events
-          for (const event of batchEvents) {
-            if (event.batch_index !== null && eventDataArray[event.batch_index]) {
-              events.push({
-                timestamp: event.timestamp,
-                type: event.type,
-                data: eventDataArray[event.batch_index],
-              });
-            }
-          }
+          return { batchKey, batchEvents, data: eventDataArray };
         } catch (error) {
           console.error(`Failed to fetch R2 batch ${batchKey}:`, error);
-          // Skip this batch if R2 fetch fails
+          return { batchKey, batchEvents, data: null };
         }
-      } else {
-        // Traditional ClickHouse storage
+      });
+      
+      const results = await Promise.all(promises);
+      r2Results.push(...results);
+      r2FetchCount += results.filter(r => r.data !== null).length;
+      
+      console.log(`[ReplayTelemetry] Parallel batch ${Math.floor(i / PARALLEL_BATCH_SIZE) + 1}/${Math.ceil(r2Batches.length / PARALLEL_BATCH_SIZE)} took ${Date.now() - parallelFetchStart}ms`);
+    }
+    
+    // Process R2 results
+    for (const { batchEvents, data } of r2Results) {
+      if (data) {
         for (const event of batchEvents) {
-          events.push({
-            timestamp: event.timestamp,
-            type: event.type,
-            data: JSON.parse(event.data),
-          });
+          if (event.batch_index !== null && data[event.batch_index]) {
+            events.push({
+              timestamp: event.timestamp,
+              type: event.type,
+              data: data[event.batch_index],
+            });
+          }
         }
       }
     }
