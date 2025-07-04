@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, PutBucketLifecycleConfigurationCommand } from "@aws-sdk/client-s3";
 import { Readable } from "stream";
 import { gunzipSync } from "zlib";
 import { compress as zstdCompress, decompress as zstdDecompress } from "@mongodb-js/zstd";
@@ -25,8 +25,46 @@ export class R2StorageService {
       this.bucketName = process.env.R2_BUCKET_NAME || "rybbit";
       this.enabled = true;
       console.log("[R2Storage] Initialized with bucket:", this.bucketName);
+      
+      // Set up automatic deletion after 30 days
+      this.setupLifecycleRules().catch(error => {
+        console.error("[R2Storage] Failed to set lifecycle rules:", error);
+      });
     } else {
       console.log("[R2Storage] Not enabled - missing IS_CLOUD or R2 credentials");
+    }
+  }
+
+  /**
+   * Set up lifecycle rules for automatic deletion after 30 days
+   */
+  private async setupLifecycleRules(): Promise<void> {
+    if (!this.enabled || !this.client) {
+      return;
+    }
+
+    try {
+      await this.client.send(new PutBucketLifecycleConfigurationCommand({
+        Bucket: this.bucketName,
+        LifecycleConfiguration: {
+          Rules: [
+            {
+              ID: "delete-replay-events-after-30-days",
+              Status: "Enabled",
+              Expiration: {
+                Days: 30
+              },
+              Filter: {} // Apply to all objects
+            }
+          ]
+        }
+      }));
+      console.log("[R2Storage] Lifecycle rules configured - objects will auto-delete after 30 days");
+    } catch (error: any) {
+      // It's okay if this fails - lifecycle rules might already be set
+      if (error.Code !== 'NoSuchLifecycleConfiguration') {
+        throw error;
+      }
     }
   }
 
