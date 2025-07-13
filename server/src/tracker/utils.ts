@@ -5,6 +5,7 @@ import { usageService } from "../services/usageService.js";
 import { userIdService } from "../services/userId/userIdService.js";
 import { trackingPayloadSchema } from "./trackEvent.js";
 import { TrackingPayload } from "./types.js";
+import { getIpAddress } from "../api/getIpAddress.js";
 
 export type TotalTrackingPayload = TrackingPayload & {
   type?: string;
@@ -123,27 +124,3 @@ export function createBasePayload(
     userId: userId,
   };
 }
-
-// Helper function to get IP address
-const getIpAddress = (request: FastifyRequest): string => {
-  // Priority 1: Cloudflare header (already validated by CF)
-  const cfConnectingIp = request.headers["cf-connecting-ip"];
-  if (cfConnectingIp && typeof cfConnectingIp === "string") {
-    return cfConnectingIp.trim();
-  }
-
-  // Priority 2: X-Forwarded-For - just use the first IP
-  const forwardedFor = request.headers["x-forwarded-for"];
-  if (forwardedFor && typeof forwardedFor === "string") {
-    const ips = forwardedFor
-      .split(",")
-      .map((ip) => ip.trim())
-      .filter(Boolean);
-    if (ips.length > 0) {
-      // Always use the first IP - the original client
-      return ips[0];
-    }
-  }
-
-  return request.ip;
-};
